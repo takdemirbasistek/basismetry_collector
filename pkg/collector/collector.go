@@ -37,10 +37,27 @@ type Collector struct {
 var tracer trace.Tracer
 var tracerBasismetryProvider *sdktrace.TracerProvider
 
-func New() *Collector {
+func New() (*Collector, error) {
 	coll := &Collector{}
-	coll.init()
-	return &Collector{}
+	err := coll.init()
+	if err != nil {
+		return nil, err
+	}
+	return coll, nil
+}
+
+func (c *Collector) init() error {
+	envFilePath := common.GetEnvFilePath()
+	err := godotenv.Load(envFilePath)
+	if err != nil {
+		return err
+	}
+	tracerBasismetryProvider, err = c.createTraceProvider()
+	if err != nil {
+		return err
+	}
+	tracer = tracerBasismetryProvider.Tracer(c.ServiceName)
+	return nil
 }
 
 func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
@@ -50,8 +67,16 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		insecure     = os.Getenv("INSECURE_MODE")
 	)
 
+	if strings.TrimSpace(collectorURL) == "" {
+		return nil, errors.New("OTEL_EXPORTER_OTLP_ENDPOINT not exist in environment file")
+	}
+
 	if strings.TrimSpace(c.ServiceName) == "" {
 		c.ServiceName = os.Getenv("SERVICE_NAME")
+	}
+
+	if strings.TrimSpace(c.ServiceName) == "" {
+		return nil, errors.New("Service name is not valid")
 	}
 
 	if strings.TrimSpace(c.ServiceVersion) == "" {
@@ -101,7 +126,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		),
 	)
 	if err != nil {
-		log.Fatalf("Could not set resources: %v", err)
+		return nil, errors.New("Resource error: " + fmt.Sprint(err))
 	}
 
 	tracerProvider := sdktrace.NewTracerProvider(
@@ -114,19 +139,6 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
 	return tracerProvider, nil
-}
-
-func (c *Collector) init() {
-	envFilePath := common.GetEnvFilePath()
-	err := godotenv.Load(envFilePath)
-	if err != nil {
-		return
-	}
-	tracerBasismetryProvider, err = c.createTraceProvider()
-	if err != nil {
-		return
-	}
-	tracer = tracerBasismetryProvider.Tracer(c.ServiceName)
 }
 
 func (c *Collector) Start(
