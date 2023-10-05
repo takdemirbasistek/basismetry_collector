@@ -38,10 +38,12 @@ var tracer trace.Tracer
 var tracerBasismetryProvider *sdktrace.TracerProvider
 
 func New() *Collector {
+	coll := &Collector{}
+	coll.init()
 	return &Collector{}
 }
 
-func (c *Collector) CreateTraceProvider() (*sdktrace.TracerProvider, error) {
+func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 	var (
 		signozToken  = os.Getenv("SIGNOZ_ACCESS_TOKEN")
 		collectorURL = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -114,13 +116,13 @@ func (c *Collector) CreateTraceProvider() (*sdktrace.TracerProvider, error) {
 	return tracerProvider, nil
 }
 
-func (c *Collector) Init() {
+func (c *Collector) init() {
 	envFilePath := common.GetEnvFilePath()
 	err := godotenv.Load(envFilePath)
 	if err != nil {
 		return
 	}
-	tracerBasismetryProvider, err = c.CreateTraceProvider()
+	tracerBasismetryProvider, err = c.createTraceProvider()
 	if err != nil {
 		return
 	}
