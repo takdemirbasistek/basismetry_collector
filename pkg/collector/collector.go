@@ -37,6 +37,10 @@ type Collector struct {
 var tracer trace.Tracer
 var tracerBasismetryProvider *sdktrace.TracerProvider
 
+func New() *Collector {
+	return &Collector{}
+}
+
 func (c *Collector) CreateTraceProvider() (*sdktrace.TracerProvider, error) {
 	var (
 		signozToken  = os.Getenv("SIGNOZ_ACCESS_TOKEN")
