@@ -143,6 +143,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 	)
 	if err != nil {
 		log.Fatal(err)
+		return nil, err
 	}
 
 	resources, err := c.createResource()
