@@ -13,7 +13,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
+	mtr "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
@@ -25,17 +28,21 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 type Collector struct {
-	ServiceName    string
-	ServiceVersion string
-	Language       string
-	DB             *sql.DB
+	ServiceName      string
+	ServiceVersion   string
+	Language         string
+	DB               *sql.DB
+	requestStartTime *time.Time
 }
 
 var tracer trace.Tracer
 var tracerBasismetryProvider *sdktrace.TracerProvider
+var meterBasismetryProvider *metric.MeterProvider
+var shutdownFunctions []func(context.Context) error
 
 func New() (*Collector, error) {
 	coll := &Collector{}
@@ -50,14 +57,36 @@ func (c *Collector) init() error {
 	envFilePath := common.GetEnvFilePath()
 	err := godotenv.Load(envFilePath)
 	if err != nil {
-		return err
+		return errors.New("read environment file error:" + fmt.Sprint(err))
 	}
+
 	tracerBasismetryProvider, err = c.createTraceProvider()
 	if err != nil {
-		return err
+		return errors.New("tracer provider error:" + fmt.Sprint(err))
 	}
 	tracer = tracerBasismetryProvider.Tracer(c.ServiceName)
+	meterBasismetryProvider, err = c.createMeterProvider(context.Background())
+	if err != nil {
+		return errors.New("meter provider error:" + fmt.Sprint(err))
+	}
 	return nil
+}
+
+func (c *Collector) createResource() (*resource.Resource, error) {
+	resources, err := resource.New(
+		context.Background(),
+		resource.WithAttributes(
+			attribute.String("service.name", c.ServiceName),
+			attribute.String("library.language", c.Language),
+			attribute.String("os", runtime.GOOS),
+			attribute.String("service.version", c.ServiceVersion),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return resources, nil
 }
 
 func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
@@ -76,7 +105,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 	}
 
 	if strings.TrimSpace(c.ServiceName) == "" {
-		return nil, errors.New("Service name is not valid")
+		return nil, errors.New("service name is not valid")
 	}
 
 	if strings.TrimSpace(c.ServiceVersion) == "" {
@@ -116,15 +145,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		log.Fatal(err)
 	}
 
-	resources, err := resource.New(
-		context.Background(),
-		resource.WithAttributes(
-			attribute.String("service.name", c.ServiceName),
-			attribute.String("library.language", c.Language),
-			attribute.String("os", runtime.GOOS),
-			attribute.String("service.version", c.ServiceVersion),
-		),
-	)
+	resources, err := c.createResource()
 	if err != nil {
 		return nil, errors.New("Resource error: " + fmt.Sprint(err))
 	}
@@ -134,11 +155,41 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(resources),
 	)
-
+	shutdownFunctions = append(shutdownFunctions, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
 	return tracerProvider, nil
+}
+
+func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvider, error) {
+	metricExporter, err := stdoutmetric.New()
+	if err != nil {
+		return nil, err
+	}
+
+	resources, err := c.createResource()
+	if err != nil {
+		return nil, errors.New("Resource error: " + fmt.Sprint(err))
+	}
+
+	meterProvider := metric.NewMeterProvider(
+		metric.WithResource(resources),
+		metric.WithReader(metric.NewPeriodicReader(metricExporter,
+			// Default is 1m. Set to 3s for demonstrative purposes.
+			metric.WithInterval(3*time.Second))),
+	)
+	shutdownFunctions = append(shutdownFunctions, meterProvider.Shutdown)
+	otel.SetMeterProvider(meterProvider)
+
+	defer func(ctx context.Context) {
+		err = meterProvider.Shutdown(ctx)
+		if err != nil {
+			log.Fatalln(err)
+		}
+	}(ctx)
+
+	return meterProvider, nil
 }
 
 func (c *Collector) Start(
@@ -147,11 +198,35 @@ func (c *Collector) Start(
 	OtherDetails map[string]string,
 	Events map[string]string,
 ) (context.Context, trace.Span) {
+	now := time.Now()
+	c.requestStartTime = &now
 	return c.createSpan(ctx, r, OtherDetails, Events)
 }
 
-func (c *Collector) End(span trace.Span) {
+func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 	if span != nil {
+		elapsedTime := float64(time.Since(*c.requestStartTime)) / float64(time.Millisecond)
+
+		meter := meterBasismetryProvider.Meter(
+			c.ServiceName,
+			mtr.WithInstrumentationVersion(c.ServiceVersion),
+		)
+		requestCounter, _ := meter.Int64Counter(
+			"request_count",
+			mtr.WithUnit("request"),
+			mtr.WithDescription("Incoming request count"),
+		)
+
+		requestDuration, _ := meter.Float64Histogram(
+			"duration",
+			mtr.WithDescription("Incoming end to end duration"),
+			mtr.WithUnit(time.Millisecond.String()),
+		)
+
+		requestCounter.Add(ctx, 1)
+		requestDuration.Record(ctx, elapsedTime)
+		c.requestStartTime = nil
+		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
 	}
 }
@@ -259,17 +334,52 @@ func (c *Collector) createSpan(ctx context.Context,
 	OtherDetails map[string]string,
 	Events map[string]string) (context.Context, trace.Span) {
 	var spanContextConfig trace.SpanContextConfig
-	/*	spanContextConfig.TraceID, _ = trace.TraceIDFromHex(payload.TraceID)
-		if strings.TrimSpace(payload.SpanID) != "" {
-			spanContextConfig.SpanID, _ = trace.SpanIDFromHex(payload.SpanID)
-		}
-		spanContextConfig.TraceFlags = 01
-		spanContextConfig.Remote = true*/
 	spanContext := trace.NewSpanContext(spanContextConfig)
 	ctx = trace.ContextWithSpanContext(ctx, spanContext)
 
-	/*	spanContextConfig.TraceID, _ = trace.TraceIDFromHex(payload.TraceID)
-		spanContextConfig.SpanID, _ = trace.SpanIDFromHex(payload.SpanID)*/
+	header := r.Header
+	traceID := ""
+	spanID := ""
+	if strings.TrimSpace(header.Get("TraceID")) != "" {
+		traceID = strings.TrimSpace(header.Get("TraceID"))
+	}
+	if strings.TrimSpace(header.Get("traceID")) != "" {
+		traceID = strings.TrimSpace(header.Get("traceID"))
+	}
+	if strings.TrimSpace(header.Get("traceid")) != "" {
+		traceID = strings.TrimSpace(header.Get("traceid"))
+	}
+	if strings.TrimSpace(header.Get("traceId")) != "" {
+		traceID = strings.TrimSpace(header.Get("traceId"))
+	}
+	if strings.TrimSpace(header.Get("trace_id")) != "" {
+		traceID = strings.TrimSpace(header.Get("trace_id"))
+	}
+
+	if strings.TrimSpace(header.Get("SpanID")) != "" {
+		spanID = strings.TrimSpace(header.Get("SpanID"))
+	}
+	if strings.TrimSpace(header.Get("spanID")) != "" {
+		spanID = strings.TrimSpace(header.Get("spanID"))
+	}
+	if strings.TrimSpace(header.Get("spanid")) != "" {
+		spanID = strings.TrimSpace(header.Get("spanid"))
+	}
+	if strings.TrimSpace(header.Get("spanId")) != "" {
+		spanID = strings.TrimSpace(header.Get("spanId"))
+	}
+	if strings.TrimSpace(header.Get("span_id")) != "" {
+		spanID = strings.TrimSpace(header.Get("span_id"))
+	}
+
+	if traceID != "" {
+		spanContextConfig.TraceID, _ = trace.TraceIDFromHex(traceID)
+	}
+
+	if spanID != "" {
+		spanContextConfig.SpanID, _ = trace.SpanIDFromHex(spanID)
+	}
+
 	spanContextConfig.TraceFlags = 01
 	spanContextConfig.Remote = true
 	spanContext = trace.NewSpanContext(spanContextConfig)
@@ -295,6 +405,14 @@ func (c *Collector) createSpan(ctx context.Context,
 			span.AddEvent(k, trace.WithAttributes(attribute.String(k, val)))
 		}
 	}
+
+	defer func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+		defer cancel()
+		if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
+			fmt.Println(fmt.Sprint(err))
+		}
+	}(ctx)
 
 	return ctx, span
 }
