@@ -199,13 +199,18 @@ func (c *Collector) Start(
 	Events map[string]string,
 ) (context.Context, trace.Span, string, string) {
 	now := time.Now()
-	c.requestStartTime = &now
+	if &now != nil {
+		c.requestStartTime = &now
+	}
 	return c.createSpan(ctx, r, OtherDetails, Events)
 }
 
 func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 	if span != nil {
-		elapsedTime := float64(time.Since(*c.requestStartTime)) / float64(time.Millisecond)
+		elapsedTime := 0.0
+		if &c.requestStartTime != nil {
+			elapsedTime = float64(time.Since(*c.requestStartTime)) / float64(time.Millisecond)
+		}
 
 		meter := meterBasismetryProvider.Meter(
 			c.ServiceName,
