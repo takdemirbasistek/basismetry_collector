@@ -197,7 +197,7 @@ func (c *Collector) Start(
 	r *http.Request,
 	OtherDetails map[string]string,
 	Events map[string]string,
-) (context.Context, trace.Span) {
+) (context.Context, trace.Span, string, string) {
 	now := time.Now()
 	c.requestStartTime = &now
 	return c.createSpan(ctx, r, OtherDetails, Events)
@@ -237,11 +237,11 @@ func (c *Collector) ErrorStart(
 	err error,
 	OtherDetails map[string]string,
 	Events map[string]string,
-) (context.Context, trace.Span) {
-	ctx, span := c.createSpan(ctx, r, OtherDetails, Events)
+) (context.Context, trace.Span, string, string) {
+	ctx, span, traceId, spanId := c.createSpan(ctx, r, OtherDetails, Events)
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
-	return ctx, span
+	return ctx, span, traceId, spanId
 }
 
 type DriverName string
@@ -332,7 +332,7 @@ func (c *Collector) CloseDB() error {
 func (c *Collector) createSpan(ctx context.Context,
 	r *http.Request,
 	OtherDetails map[string]string,
-	Events map[string]string) (context.Context, trace.Span) {
+	Events map[string]string) (context.Context, trace.Span, string, string) {
 	var spanContextConfig trace.SpanContextConfig
 	spanContext := trace.NewSpanContext(spanContextConfig)
 	ctx = trace.ContextWithSpanContext(ctx, spanContext)
@@ -386,7 +386,7 @@ func (c *Collector) createSpan(ctx context.Context,
 	ctx = trace.ContextWithSpanContext(ctx, spanContext)
 	//c.SetRequest(c.Request().WithContext(ctx))
 	if tracer == nil {
-		return nil, nil
+		return nil, nil, "", ""
 	}
 	ctx, span := tracer.Start(ctx, fmt.Sprintf("%s %s", r.Method, r.RequestURI))
 	span.SetAttributes(attribute.String("http.host", r.Host))
@@ -414,5 +414,13 @@ func (c *Collector) createSpan(ctx context.Context,
 		}
 	}(ctx)
 
-	return ctx, span
+	if traceID == "" {
+		traceID = span.SpanContext().TraceID().String()
+	}
+
+	if spanID == "" {
+		spanID = span.SpanContext().SpanID().String()
+	}
+
+	return ctx, span, traceID, spanID
 }
