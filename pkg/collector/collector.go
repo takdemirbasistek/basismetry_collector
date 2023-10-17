@@ -183,13 +183,6 @@ func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvi
 	shutdownFunctions = append(shutdownFunctions, meterProvider.Shutdown)
 	otel.SetMeterProvider(meterProvider)
 
-	defer func(ctx context.Context) {
-		err = meterProvider.Shutdown(ctx)
-		if err != nil {
-			log.Fatalln(err)
-		}
-	}(ctx)
-
 	return meterProvider, nil
 }
 
@@ -233,6 +226,13 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 			defer cancel()
 			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
 				fmt.Println(fmt.Sprint(err))
+			}
+		}(ctx)
+
+		defer func(ctx context.Context) {
+			err := meterBasismetryProvider.Shutdown(ctx)
+			if err != nil {
+				log.Fatalln(err)
 			}
 		}(ctx)
 	}
