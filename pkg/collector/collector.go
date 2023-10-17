@@ -227,6 +227,14 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 		//c.requestStartTime = nil
 		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
+
+		defer func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()
+			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
+				fmt.Println(fmt.Sprint(err))
+			}
+		}(ctx)
 	}
 }
 
@@ -404,14 +412,6 @@ func (c *Collector) createSpan(ctx context.Context,
 			span.AddEvent(k, trace.WithAttributes(attribute.String(k, val)))
 		}
 	}
-
-	defer func(ctx context.Context) {
-		ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-		defer cancel()
-		if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
-			fmt.Println(fmt.Sprint(err))
-		}
-	}(ctx)
 
 	if traceID == "" {
 		traceID = span.SpanContext().TraceID().String()
