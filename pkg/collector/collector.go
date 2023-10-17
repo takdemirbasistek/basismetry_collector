@@ -223,7 +223,7 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 
 		requestCounter.Add(ctx, 1)
 		requestDuration.Record(ctx, elapsedTime)
-		c.requestStartTime = nil
+		//c.requestStartTime = nil
 		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
 	}
