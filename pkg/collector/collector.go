@@ -199,10 +199,12 @@ func (c *Collector) Start(
 func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 	if span != nil {
 		elapsedTime := float64(time.Since(c.requestStartTime)) / float64(time.Millisecond)
+
 		meter := meterBasismetryProvider.Meter(
 			c.ServiceName,
 			mtr.WithInstrumentationVersion(c.ServiceVersion),
 		)
+
 		requestCounter, _ := meter.Int64Counter(
 			"request_count",
 			mtr.WithUnit("request"),
@@ -217,22 +219,23 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 
 		requestCounter.Add(ctx, 1)
 		requestDuration.Record(ctx, elapsedTime)
+
 		//c.requestStartTime = nil
 		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
+
+		defer func(ctx context.Context) {
+			err := meterBasismetryProvider.Shutdown(ctx)
+			if err != nil {
+				log.Fatalln(err)
+			}
+		}(ctx)
 
 		defer func(ctx context.Context) {
 			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 			defer cancel()
 			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
 				fmt.Println(fmt.Sprint(err))
-			}
-		}(ctx)
-
-		defer func(ctx context.Context) {
-			err := meterBasismetryProvider.Shutdown(ctx)
-			if err != nil {
-				log.Fatalln(err)
 			}
 		}(ctx)
 	}
