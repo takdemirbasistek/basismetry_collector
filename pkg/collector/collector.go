@@ -11,9 +11,10 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
+
 	mtr "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -164,7 +165,24 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 }
 
 func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvider, error) {
-	metricExporter, err := stdoutmetric.New()
+
+	var (
+		collectorURL = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+		insecure     = os.Getenv("INSECURE_MODE")
+	)
+
+	//metricExporter, err := stdoutmetric.New()
+	secureOption := otlpmetricgrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")) // config can be passed to configure TLS
+	if len(insecure) > 0 {
+		secureOption = otlpmetricgrpc.WithInsecure()
+	}
+
+	exporter, err := otlpmetricgrpc.New(
+		ctx,
+		otlpmetricgrpc.WithEndpoint(collectorURL),
+		secureOption,
+	)
+
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +194,7 @@ func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvi
 
 	meterProvider := metric.NewMeterProvider(
 		metric.WithResource(resources),
-		metric.WithReader(metric.NewPeriodicReader(metricExporter,
+		metric.WithReader(metric.NewPeriodicReader(exporter,
 			// Default is 1m. Set to 3s for demonstrative purposes.
 			metric.WithInterval(3*time.Second))),
 	)
