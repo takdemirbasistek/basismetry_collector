@@ -23,7 +23,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/credentials"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -60,7 +59,6 @@ func (c *Collector) init() error {
 	if err != nil {
 		return errors.New("read environment file error:" + fmt.Sprint(err))
 	}
-
 	tracerBasismetryProvider, err = c.createTraceProvider()
 	if err != nil {
 		return errors.New("tracer provider error:" + fmt.Sprint(err))
@@ -143,7 +141,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		),
 	)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(fmt.Sprint(err))
 		return nil, err
 	}
 
@@ -157,6 +155,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 		sdktrace.WithResource(resources),
 	)
+
 	shutdownFunctions = append(shutdownFunctions, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
@@ -196,7 +195,7 @@ func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvi
 		metric.WithResource(resources),
 		metric.WithReader(metric.NewPeriodicReader(exporter,
 			// Default is 1m. Set to 3s for demonstrative purposes.
-			metric.WithInterval(3*time.Second))),
+			metric.WithInterval(10*time.Second))),
 	)
 	shutdownFunctions = append(shutdownFunctions, meterProvider.Shutdown)
 	otel.SetMeterProvider(meterProvider)
@@ -243,9 +242,11 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 		span.End()
 
 		defer func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()
 			err := meterBasismetryProvider.Shutdown(ctx)
 			if err != nil {
-				log.Fatalln(err)
+				fmt.Println(err, "provider shutdown err:1-1")
 			}
 		}(ctx)
 
@@ -253,7 +254,7 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
 			defer cancel()
 			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
-				fmt.Println(fmt.Sprint(err))
+				fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
 			}
 		}(ctx)
 	}
