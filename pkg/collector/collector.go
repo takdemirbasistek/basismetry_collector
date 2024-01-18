@@ -34,18 +34,20 @@ import (
 )
 
 type Collector struct {
-	ServiceName       string
-	ServiceVersion    string
-	Language          string
-	collectorURL      string
-	signozToken       string
-	insecure          bool
-	DB                *sql.DB
-	requestStartTime  time.Time
-	ctx               context.Context
-	resources         *resource.Resource
-	shutdownFunctions []func(context.Context) error
-	conn              *grpc.ClientConn
+	ServiceName              string
+	ServiceVersion           string
+	Language                 string
+	collectorURL             string
+	signozToken              string
+	insecure                 bool
+	DB                       *sql.DB
+	requestStartTime         time.Time
+	ctx                      context.Context
+	resources                *resource.Resource
+	shutdownFunctions        []func(context.Context) error
+	conn                     *grpc.ClientConn
+	meterBasismetryProvider  *metric.MeterProvider
+	tracerBasismetryProvider *sdktrace.TracerProvider
 }
 
 var tracer trace.Tracer
@@ -83,12 +85,13 @@ func (c *Collector) init() error {
 	if err != nil {
 		return errors.New("tracer provider error:" + fmt.Sprint(err))
 	}
-
+	c.tracerBasismetryProvider = tracerBasismetryProvider
 	tracer = tracerBasismetryProvider.Tracer(c.ServiceName)
 	meterBasismetryProvider, err = c.createMeterProvider(context.Background())
 	if err != nil {
 		return errors.New("meter provider error:" + fmt.Sprint(err))
 	}
+	c.meterBasismetryProvider = meterBasismetryProvider
 	return nil
 }
 
@@ -290,8 +293,8 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) er
 		}*/
 
 		defer func(ctx context.Context) {
-			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()
+			/*ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()*/
 			err := meterBasismetryProvider.Shutdown(ctx)
 			if err != nil {
 				fmt.Println(err, "provider shutdown err:1-1")
@@ -299,8 +302,8 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) er
 		}(ctx)
 
 		defer func(ctx context.Context) {
-			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()
+			/*ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()*/
 			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
 				fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
 			}
