@@ -280,14 +280,14 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) er
 		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
 
-		for index, shtdwnFunc := range c.shutdownFunctions {
+		/*for index, shtdwnFunc := range c.shutdownFunctions {
 			err := shtdwnFunc(ctx)
 			if err != nil {
 				msg := fmt.Sprintf("shutdown error: %d -  %v", index, err)
 				fmt.Println(msg)
 				return errors.New(msg)
 			}
-		}
+		}*/
 
 		defer func(ctx context.Context) {
 			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
