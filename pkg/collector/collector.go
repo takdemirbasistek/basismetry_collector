@@ -14,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-
 	mtr "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -22,7 +21,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.20.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,11 +33,17 @@ import (
 )
 
 type Collector struct {
-	ServiceName      string
-	ServiceVersion   string
-	Language         string
-	DB               *sql.DB
-	requestStartTime time.Time
+	ServiceName       string
+	ServiceVersion    string
+	Language          string
+	collectorURL      string
+	signozToken       string
+	insecure          bool
+	DB                *sql.DB
+	requestStartTime  time.Time
+	ctx               context.Context
+	resources         *resource.Resource
+	shutdownFunctions []func(context.Context) error
 }
 
 var tracer trace.Tracer
@@ -56,6 +63,15 @@ func New() (*Collector, error) {
 func (c *Collector) init() error {
 	envFilePath := common.GetEnvFilePath()
 	err := godotenv.Load(envFilePath)
+	signozToken := os.Getenv("SIGNOZ_ACCESS_TOKEN")
+	collectorURL := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	insecure := os.Getenv("INSECURE_MODE")
+	if strings.TrimSpace(collectorURL) == "" {
+		return errors.New("OTEL_EXPORTER_OTLP_ENDPOINT not exist in environment file")
+	}
+	c.collectorURL = collectorURL
+	c.insecure = insecure == "true"
+	c.signozToken = signozToken
 	if err != nil {
 		return errors.New("read environment file error:" + fmt.Sprint(err))
 	}
@@ -74,6 +90,10 @@ func (c *Collector) init() error {
 func (c *Collector) createResource() (*resource.Resource, error) {
 	resources, err := resource.New(
 		context.Background(),
+		resource.WithFromEnv(),
+		resource.WithProcess(),
+		resource.WithTelemetrySDK(),
+		resource.WithHost(),
 		resource.WithAttributes(
 			attribute.String("service.name", c.ServiceName),
 			attribute.String("library.language", c.Language),
@@ -89,15 +109,6 @@ func (c *Collector) createResource() (*resource.Resource, error) {
 }
 
 func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
-	var (
-		signozToken  = os.Getenv("SIGNOZ_ACCESS_TOKEN")
-		collectorURL = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-		insecure     = os.Getenv("INSECURE_MODE")
-	)
-
-	if strings.TrimSpace(collectorURL) == "" {
-		return nil, errors.New("OTEL_EXPORTER_OTLP_ENDPOINT not exist in environment file")
-	}
 
 	if strings.TrimSpace(c.ServiceName) == "" {
 		c.ServiceName = os.Getenv("SERVICE_NAME")
@@ -121,34 +132,41 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 	}
 
 	var headers = make(map[string]string)
-	if strings.TrimSpace(signozToken) != "" {
+	if strings.TrimSpace(c.signozToken) != "" {
 		headers = map[string]string{
-			"signoz-access-token": signozToken,
+			"signoz-access-token": c.signozToken,
 		}
 	}
 
+	ctx := context.Background()
+
 	secureOption := otlptracegrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")) // config can be passed to configure TLS
-	if len(insecure) > 0 {
+	if c.insecure {
 		secureOption = otlptracegrpc.WithInsecure()
 	}
 
+	conn, err := grpc.DialContext(ctx, c.collectorURL, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+
 	exporter, err := otlptrace.New(
-		context.Background(),
+		ctx,
 		otlptracegrpc.NewClient(
 			secureOption,
-			otlptracegrpc.WithEndpoint(collectorURL),
+			otlptracegrpc.WithGRPCConn(conn),
 			otlptracegrpc.WithHeaders(headers),
 		),
 	)
+
 	if err != nil {
 		fmt.Println(fmt.Sprint(err))
-		return nil, err
+		return nil, errors.New("otlp trace new err: " + fmt.Sprint(err))
 	}
 
 	resources, err := c.createResource()
 	if err != nil {
 		return nil, errors.New("Resource error: " + fmt.Sprint(err))
 	}
+
+	c.resources = resources
 
 	tracerProvider := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter),
@@ -157,6 +175,7 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 	)
 
 	shutdownFunctions = append(shutdownFunctions, tracerProvider.Shutdown)
+	c.shutdownFunctions = shutdownFunctions
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
@@ -165,20 +184,16 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 
 func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvider, error) {
 
-	var (
-		collectorURL = os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-		insecure     = os.Getenv("INSECURE_MODE")
-	)
-
 	//metricExporter, err := stdoutmetric.New()
 	secureOption := otlpmetricgrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")) // config can be passed to configure TLS
-	if len(insecure) > 0 {
+
+	if c.insecure {
 		secureOption = otlpmetricgrpc.WithInsecure()
 	}
 
 	exporter, err := otlpmetricgrpc.New(
 		ctx,
-		otlpmetricgrpc.WithEndpoint(collectorURL),
+		otlpmetricgrpc.WithEndpoint(strings.TrimSpace(c.collectorURL)),
 		secureOption,
 	)
 
@@ -186,18 +201,26 @@ func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvi
 		return nil, err
 	}
 
-	resources, err := c.createResource()
-	if err != nil {
-		return nil, errors.New("Resource error: " + fmt.Sprint(err))
+	resources := c.resources
+	if resources == nil {
+		resources, err = c.createResource()
+		if err != nil {
+			return nil, errors.New("Resource error on create meter provider: " + fmt.Sprint(err))
+		}
 	}
+
+	/*	meterProvider := metric.NewMeterProvider(
+		metric.WithResource(resources),
+		metric.WithReader(metric.NewPeriodicReader(exporter, metric.WithInterval(60*time.Second))),
+	)*/
 
 	meterProvider := metric.NewMeterProvider(
 		metric.WithResource(resources),
-		metric.WithReader(metric.NewPeriodicReader(exporter,
-			// Default is 1m. Set to 3s for demonstrative purposes.
-			metric.WithInterval(10*time.Second))),
+		metric.WithReader(metric.NewPeriodicReader(exporter)),
 	)
+
 	shutdownFunctions = append(shutdownFunctions, meterProvider.Shutdown)
+	c.shutdownFunctions = shutdownFunctions
 	otel.SetMeterProvider(meterProvider)
 
 	return meterProvider, nil
@@ -241,22 +264,29 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
 
-		defer func(ctx context.Context) {
-			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()
-			err := meterBasismetryProvider.Shutdown(ctx)
+		for index, shtdwnFunc := range c.shutdownFunctions {
+			err := shtdwnFunc(ctx)
 			if err != nil {
-				fmt.Println(err, "provider shutdown err:1-1")
+				fmt.Println(fmt.Sprintf("shutdown error: %d -  %v", index, err))
 			}
-		}(ctx)
+		}
 
-		defer func(ctx context.Context) {
-			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()
-			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
-				fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
-			}
-		}(ctx)
+		/*		defer func(ctx context.Context) {
+					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+					defer cancel()
+					err := meterBasismetryProvider.Shutdown(ctx)
+					if err != nil {
+						fmt.Println(err, "provider shutdown err:1-1")
+					}
+				}(ctx)
+
+				defer func(ctx context.Context) {
+					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+					defer cancel()
+					if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
+						fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
+					}
+				}(ctx)*/
 	}
 }
 
@@ -271,91 +301,6 @@ func (c *Collector) ErrorStart(
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
 	return ctx, span, traceId, spanId
-}
-
-type DriverName string
-
-const (
-	MySQL      DriverName = "mysql"
-	MariaDB    DriverName = "mariadb"
-	MSSQL      DriverName = "mssql"
-	PostgreSQL DriverName = "postgresql"
-	Oracle     DriverName = "oracle"
-	MongoDB    DriverName = "mongodb"
-	Cassandra  DriverName = "cassandra"
-)
-
-func (s DriverName) IsValid() bool {
-	switch s {
-	case MySQL, PostgreSQL, MariaDB, MSSQL, Oracle, MongoDB, Cassandra:
-		return true
-	}
-	return false
-}
-
-func (s DriverName) String() string {
-	return string(s)
-}
-
-func datasourceName(username, password, host, dbName string) string {
-	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, host, dbName)
-}
-
-func (c *Collector) OpenDB(driverName DriverName, username string, password string, host string, dbName string) (*sql.DB, error) {
-
-	if !driverName.IsValid() {
-		return nil, errors.New("driver name is invalid")
-	}
-
-	var attr attribute.KeyValue
-
-	switch driverName {
-	case MySQL:
-		attr = semconv.DBSystemMySQL
-		break
-	case MariaDB:
-		attr = semconv.DBSystemMariaDB
-		break
-	case MSSQL:
-		attr = semconv.DBSystemMSSQL
-		break
-	case PostgreSQL:
-		attr = semconv.DBSystemPostgreSQL
-		break
-	case Oracle:
-		attr = semconv.DBSystemOracle
-		break
-	case MongoDB:
-		attr = semconv.DBSystemMongoDB
-		break
-	case Cassandra:
-		attr = semconv.DBSystemCassandra
-		break
-
-	}
-
-	// open up our database connection.
-	db, err := otelsql.Open(driverName.String(), datasourceName(username, password, host, dbName), otelsql.WithAttributes(
-		attr,
-	))
-	if err != nil {
-		return nil, fmt.Errorf("open main db error: %w", err)
-	}
-
-	if err = db.Ping(); err != nil {
-		return nil, fmt.Errorf("ping error: %w", err)
-	}
-
-	return c.DB, nil
-}
-
-func (c *Collector) CloseDB() error {
-	err := c.DB.Close()
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (c *Collector) createSpan(ctx context.Context,
@@ -444,4 +389,89 @@ func (c *Collector) createSpan(ctx context.Context,
 	}
 
 	return ctx, span, traceID, spanID
+}
+
+type DriverName string
+
+const (
+	MySQL      DriverName = "mysql"
+	MariaDB    DriverName = "mariadb"
+	MSSQL      DriverName = "mssql"
+	PostgreSQL DriverName = "postgresql"
+	Oracle     DriverName = "oracle"
+	MongoDB    DriverName = "mongodb"
+	Cassandra  DriverName = "cassandra"
+)
+
+func (s DriverName) IsValid() bool {
+	switch s {
+	case MySQL, PostgreSQL, MariaDB, MSSQL, Oracle, MongoDB, Cassandra:
+		return true
+	}
+	return false
+}
+
+func (s DriverName) String() string {
+	return string(s)
+}
+
+func datasourceName(username, password, host, dbName string) string {
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s", username, password, host, dbName)
+}
+
+func (c *Collector) OpenDB(driverName DriverName, username string, password string, host string, dbName string) (*sql.DB, error) {
+
+	if !driverName.IsValid() {
+		return nil, errors.New("driver name is invalid")
+	}
+
+	var attr attribute.KeyValue
+
+	switch driverName {
+	case MySQL:
+		attr = semconv.DBSystemMySQL
+		break
+	case MariaDB:
+		attr = semconv.DBSystemMariaDB
+		break
+	case MSSQL:
+		attr = semconv.DBSystemMSSQL
+		break
+	case PostgreSQL:
+		attr = semconv.DBSystemPostgreSQL
+		break
+	case Oracle:
+		attr = semconv.DBSystemOracle
+		break
+	case MongoDB:
+		attr = semconv.DBSystemMongoDB
+		break
+	case Cassandra:
+		attr = semconv.DBSystemCassandra
+		break
+
+	}
+
+	// open up our database connection.
+	db, err := otelsql.Open(driverName.String(), datasourceName(username, password, host, dbName), otelsql.WithAttributes(
+		attr,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("open main db error: %w", err)
+	}
+
+	if err = db.Ping(); err != nil {
+		return nil, fmt.Errorf("ping error: %w", err)
+	}
+
+	return c.DB, nil
+}
+
+func (c *Collector) CloseDB() error {
+	err := c.DB.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
