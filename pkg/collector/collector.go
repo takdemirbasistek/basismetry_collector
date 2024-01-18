@@ -34,20 +34,18 @@ import (
 )
 
 type Collector struct {
-	ServiceName              string
-	ServiceVersion           string
-	Language                 string
-	collectorURL             string
-	signozToken              string
-	insecure                 bool
-	DB                       *sql.DB
-	requestStartTime         time.Time
-	ctx                      context.Context
-	resources                *resource.Resource
-	shutdownFunctions        []func(context.Context) error
-	conn                     *grpc.ClientConn
-	meterBasismetryProvider  *metric.MeterProvider
-	tracerBasismetryProvider *sdktrace.TracerProvider
+	ServiceName       string
+	ServiceVersion    string
+	Language          string
+	collectorURL      string
+	signozToken       string
+	insecure          bool
+	DB                *sql.DB
+	requestStartTime  time.Time
+	ctx               context.Context
+	resources         *resource.Resource
+	shutdownFunctions []func(context.Context) error
+	conn              *grpc.ClientConn
 }
 
 var tracer trace.Tracer
@@ -85,13 +83,12 @@ func (c *Collector) init() error {
 	if err != nil {
 		return errors.New("tracer provider error:" + fmt.Sprint(err))
 	}
-	c.tracerBasismetryProvider = tracerBasismetryProvider
+
 	tracer = tracerBasismetryProvider.Tracer(c.ServiceName)
 	meterBasismetryProvider, err = c.createMeterProvider(context.Background())
 	if err != nil {
 		return errors.New("meter provider error:" + fmt.Sprint(err))
 	}
-	c.meterBasismetryProvider = meterBasismetryProvider
 	return nil
 }
 
@@ -194,6 +191,10 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 		sdktrace.WithResource(resources),
 	)
 
+	if len(shutdownFunctions) > 0 {
+		shutdownFunctions = shutdownFunctions[:0]
+	}
+
 	shutdownFunctions = append(shutdownFunctions, tracerProvider.Shutdown)
 	c.shutdownFunctions = shutdownFunctions
 	otel.SetTracerProvider(tracerProvider)
@@ -255,8 +256,10 @@ func (c *Collector) Start(
 	return c.createSpan(ctx, r, OtherDetails, Events)
 }
 
-func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) error {
+func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
+
 	if span != nil {
+
 		elapsedTime := float64(time.Since(c.requestStartTime)) / float64(time.Millisecond)
 
 		meter := meterBasismetryProvider.Meter(
@@ -283,34 +286,33 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) er
 		span.SetAttributes(attribute.Int("responseCode", statusCode))
 		span.End()
 
-		/*for index, shtdwnFunc := range c.shutdownFunctions {
+		for index, shtdwnFunc := range c.shutdownFunctions {
 			err := shtdwnFunc(ctx)
 			if err != nil {
 				msg := fmt.Sprintf("shutdown error: %d -  %v", index, err)
 				fmt.Println(msg)
-				return errors.New(msg)
 			}
-		}*/
+		}
 
-		defer func(ctx context.Context) {
-			/*ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()*/
-			err := meterBasismetryProvider.Shutdown(ctx)
-			if err != nil {
-				fmt.Println(err, "provider shutdown err:1-1")
-			}
-		}(ctx)
+		/*		defer func(ctx context.Context) {
+					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+					defer cancel()
+					err := meterBasismetryProvider.Shutdown(ctx)
+					if err != nil {
+						fmt.Println(err, "provider shutdown err:1-1")
+					}
+				}(ctx)
 
-		defer func(ctx context.Context) {
-			/*ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-			defer cancel()*/
-			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
-				fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
-			}
-		}(ctx)
+				defer func(ctx context.Context) {
+					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+					defer cancel()
+					if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
+						fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
+					}
+				}(ctx)*/
 	}
 
-	return errors.New("no span found to end")
+	//return errors.New("no span found to end")
 }
 
 func (c *Collector) ErrorStart(
