@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,6 +45,7 @@ type Collector struct {
 	ctx               context.Context
 	resources         *resource.Resource
 	shutdownFunctions []func(context.Context) error
+	conn              *grpc.ClientConn
 }
 
 var tracer trace.Tracer
@@ -61,24 +63,27 @@ func New() (*Collector, error) {
 }
 
 func (c *Collector) init() error {
+
 	envFilePath := common.GetEnvFilePath()
 	err := godotenv.Load(envFilePath)
 	signozToken := os.Getenv("SIGNOZ_ACCESS_TOKEN")
 	collectorURL := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-	insecure := os.Getenv("INSECURE_MODE")
+	inSecure := os.Getenv("INSECURE_MODE")
 	if strings.TrimSpace(collectorURL) == "" {
 		return errors.New("OTEL_EXPORTER_OTLP_ENDPOINT not exist in environment file")
 	}
 	c.collectorURL = collectorURL
-	c.insecure = insecure == "true"
+	c.insecure = inSecure == "true"
 	c.signozToken = signozToken
 	if err != nil {
 		return errors.New("read environment file error:" + fmt.Sprint(err))
 	}
+
 	tracerBasismetryProvider, err = c.createTraceProvider()
 	if err != nil {
 		return errors.New("tracer provider error:" + fmt.Sprint(err))
 	}
+
 	tracer = tracerBasismetryProvider.Tracer(c.ServiceName)
 	meterBasismetryProvider, err = c.createMeterProvider(context.Background())
 	if err != nil {
@@ -102,6 +107,7 @@ func (c *Collector) createResource() (*resource.Resource, error) {
 		),
 	)
 	if err != nil {
+		fmt.Println("resource in err: " + fmt.Sprint(err))
 		return nil, err
 	}
 
@@ -140,18 +146,29 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 
 	ctx := context.Background()
 
+	URLStruct, _ := url.Parse(c.collectorURL)
+
+	if c.conn == nil {
+		conn, err := grpc.DialContext(ctx, URLStruct.Host, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+
+		if err != nil {
+			fmt.Println(fmt.Sprint(err))
+			return nil, errors.New("otlp grpc dial err: " + fmt.Sprint(err))
+		}
+
+		c.conn = conn
+	}
+
 	secureOption := otlptracegrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")) // config can be passed to configure TLS
 	if c.insecure {
 		secureOption = otlptracegrpc.WithInsecure()
 	}
 
-	conn, err := grpc.DialContext(ctx, c.collectorURL, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-
 	exporter, err := otlptrace.New(
 		ctx,
 		otlptracegrpc.NewClient(
 			secureOption,
-			otlptracegrpc.WithGRPCConn(conn),
+			otlptracegrpc.WithGRPCConn(c.conn),
 			otlptracegrpc.WithHeaders(headers),
 		),
 	)
@@ -184,7 +201,6 @@ func (c *Collector) createTraceProvider() (*sdktrace.TracerProvider, error) {
 
 func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvider, error) {
 
-	//metricExporter, err := stdoutmetric.New()
 	secureOption := otlpmetricgrpc.WithTLSCredentials(credentials.NewClientTLSFromCert(nil, "")) // config can be passed to configure TLS
 
 	if c.insecure {
@@ -193,7 +209,7 @@ func (c *Collector) createMeterProvider(ctx context.Context) (*metric.MeterProvi
 
 	exporter, err := otlpmetricgrpc.New(
 		ctx,
-		otlpmetricgrpc.WithEndpoint(strings.TrimSpace(c.collectorURL)),
+		otlpmetricgrpc.WithGRPCConn(c.conn),
 		secureOption,
 	)
 
@@ -236,7 +252,7 @@ func (c *Collector) Start(
 	return c.createSpan(ctx, r, OtherDetails, Events)
 }
 
-func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
+func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) error {
 	if span != nil {
 		elapsedTime := float64(time.Since(c.requestStartTime)) / float64(time.Millisecond)
 
@@ -267,9 +283,13 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 		for index, shtdwnFunc := range c.shutdownFunctions {
 			err := shtdwnFunc(ctx)
 			if err != nil {
-				fmt.Println(fmt.Sprintf("shutdown error: %d -  %v", index, err))
+				msg := fmt.Sprintf("shutdown error: %d -  %v", index, err)
+				fmt.Println(msg)
+				return errors.New(msg)
 			}
 		}
+
+		return nil
 
 		/*		defer func(ctx context.Context) {
 					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
@@ -288,6 +308,8 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) {
 					}
 				}(ctx)*/
 	}
+
+	return errors.New("no span found to end")
 }
 
 func (c *Collector) ErrorStart(
