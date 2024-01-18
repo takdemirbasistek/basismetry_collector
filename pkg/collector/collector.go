@@ -289,24 +289,22 @@ func (c *Collector) End(ctx context.Context, statusCode int, span trace.Span) er
 			}
 		}
 
-		return nil
+		defer func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()
+			err := meterBasismetryProvider.Shutdown(ctx)
+			if err != nil {
+				fmt.Println(err, "provider shutdown err:1-1")
+			}
+		}(ctx)
 
-		/*		defer func(ctx context.Context) {
-					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-					defer cancel()
-					err := meterBasismetryProvider.Shutdown(ctx)
-					if err != nil {
-						fmt.Println(err, "provider shutdown err:1-1")
-					}
-				}(ctx)
-
-				defer func(ctx context.Context) {
-					ctx, cancel := context.WithTimeout(ctx, time.Second*5)
-					defer cancel()
-					if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
-						fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
-					}
-				}(ctx)*/
+		defer func(ctx context.Context) {
+			ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+			defer cancel()
+			if err := tracerBasismetryProvider.Shutdown(ctx); err != nil {
+				fmt.Println("provider shutdown err:1-2 " + fmt.Sprint(err))
+			}
+		}(ctx)
 	}
 
 	return errors.New("no span found to end")
